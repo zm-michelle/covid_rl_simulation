@@ -1,0 +1,8 @@
+networkx==3.3
+numpy==1.26.4
+python-louvain==0.16
+pandas==2.2.2
+torch
+tqdm
+tensorboard
+matplotlib
