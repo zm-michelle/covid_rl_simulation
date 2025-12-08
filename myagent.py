@@ -169,7 +169,7 @@ class Agent:
         self.critic.load_state_dict(checkpoint['critic_state_dict'])
 
 
-    def test (self, verbose=False, plot_results='test_results.png'):
+    def test(self, verbose=False, plot_results='test_results.png'):
         actions_recorded = torch.zeros(self.out_size).to(self.device)
         rewards = []
         
@@ -246,8 +246,9 @@ class Agent:
             'removed_people': removed_people,
             'named_actions': action_names
         }
-        with open(f'{plot_results[:-4]}.json', 'w') as f:
-            json.dump(results, f, indent=4)
+        if plot_results is not None:
+            with open(f'{plot_results[:-4]}.json', 'w') as f:
+                json.dump(results, f, indent=4)
 
         return results
     def get_action_name(self, action_idx):
@@ -264,7 +265,7 @@ def Empty():
 
 
 
-def train(lr_actor=1e-4, lr_critic=1e-4, epochs=3000, model_dir='models',verbose=True,device=torch.device('cpu'),temperature=1.0):
+def train(lr_actor=1e-4, lr_critic=1e-6, epochs=3000, model_dir='models',verbose=True,device=torch.device('cpu'),temperature=1.0):
     NETWORK_FILE ='Community.gml'
      
     r = []  
@@ -297,6 +298,9 @@ def train(lr_actor=1e-4, lr_critic=1e-4, epochs=3000, model_dir='models',verbose
         actor_loss.backward()
         critic_loss.backward()
 
+        actor_grad_norm = torch.nn.utils.clip_grad_norm_(agent.actor.parameters(), max_norm=float('inf'))
+        critic_grad_norm = torch.nn.utils.clip_grad_norm_(agent.critic.parameters(), max_norm=float('inf'))
+
         actor_optim.step()
         critic_optim.step()
 
@@ -304,9 +308,14 @@ def train(lr_actor=1e-4, lr_critic=1e-4, epochs=3000, model_dir='models',verbose
         writer.add_scalar('Network/susceptible', final_state['susceptible'], i)
         writer.add_scalar('Network/infected', final_state['infected'], i)
         writer.add_scalar('Network/removed', final_state['removed'], i)
-
+        writer.add_scalar('Network/immune', final_state['immune'], i)
         writer.add_scalar('Network/money', final_state['liquid'], i)
+
         writer.add_scalar('Reward/Total', total_reward, i)
+        
+        writer.add_scalar('GradNorm/Critic', actor_grad_norm, i)
+        writer.add_scalar('GradNorm/Actor', critic_grad_norm, i)
+
         writer.add_scalar('Loss/Actor', actor_loss.item(), i)
         writer.add_scalar('Loss/Critic', critic_loss.item(), i)
 
@@ -324,16 +333,246 @@ def train(lr_actor=1e-4, lr_critic=1e-4, epochs=3000, model_dir='models',verbose
         'actor_state_dict': agent.actor.state_dict(),
         'critic_state_dict': agent.critic.state_dict(),
     }, os.path.join(model_dir, 'final_model.pt'))
-def test(model_path,  device= torch.device('cpu')):
+def test(model_path,  device= torch.device('cpu'), plot_results=None):
     r = []  
     env = gameEnvironment(rl_agent=Empty)
     agent = Agent(env, device=device)
     agent.load_model(model_path)
-    agent.test( )
-   
+    results = agent.test(plot_results=None )
+    return results
 
+
+def n_tests(n, model_path, tests_folder, device=None):
+    """
+    Run n tests and aggregate results
+    
+    Args:
+        n: Number of tests to run
+        model_path: Path to the trained model
+        tests_folder: Folder to save test results
+        device: Torch device (CPU or CUDA)
+    
+    Returns:
+        Dictionary with aggregated results
+    """
+    if device is None:
+        device = torch.device('cpu')
+    
+    # Initialize lists to store results
+    rewards = []
+    reward_sum = []
+    actions_recorded = []
+    infections = []
+    new_infections = []
+    immune_people = []
+    removed_people = []
+    all_named_actions = []
+    
+    # Create tests folder
+    os.makedirs(tests_folder, exist_ok=True)
+    
+    print(f"Running {n} tests...")
+    
+    for i in tqdm(range(n), desc="Testing"):
+        # Run individual test
+        test_plot_path = os.path.join(tests_folder, f'test_{i}.png')
+        results = test(model_path, device=device, plot_results=test_plot_path)
+        
+        # Append results
+        rewards.append(results['rewards'])
+        reward_sum.append(results['total_reward'])
+        actions_recorded.append(results['actions_recorded'])
+        infections.append(results['infections'])
+        new_infections.append(results['new_infections'])
+        immune_people.append(results['immune_people'])
+        removed_people.append(results['removed_people'])
+        all_named_actions.append(results['named_actions'])
+    
+    # Compute statistics
+    reward_sum_array = np.array(reward_sum)
+    
+    aggregated_results = {
+        'n_tests': n,
+        'rewards': rewards,
+        'reward_sum': reward_sum,
+        'reward_mean': float(np.mean(reward_sum_array)),
+        'reward_std': float(np.std(reward_sum_array)),
+        'reward_min': float(np.min(reward_sum_array)),
+        'reward_max': float(np.max(reward_sum_array)),
+        'actions_recorded': actions_recorded,
+        'infections': infections,
+        'new_infections': new_infections,
+        'immune_people': immune_people,
+        'removed_people': removed_people,
+        'named_actions': all_named_actions
+    }
+    
+    # Save aggregated results
+    with open(os.path.join(tests_folder, 'aggregated_results.json'), 'w') as f:
+        json.dump(aggregated_results, f, indent=4)
+    
+    # Create summary plots
+    create_summary_plots(aggregated_results, tests_folder)
+    
+    # Save CSV with all named actions
+    with open(os.path.join(tests_folder, 'all_actions.csv'), 'w') as f:
+        f.write('Test_ID,Action\n')
+        for i, actions in enumerate(all_named_actions):
+            for action in actions:
+                f.write(f'{i},{action}\n')
+    
+    print(f"\nTest Summary:")
+    print(f"  Mean Reward: {aggregated_results['reward_mean']:.2f}")
+    print(f"  Std Reward: {aggregated_results['reward_std']:.2f}")
+    print(f"  Min Reward: {aggregated_results['reward_min']:.2f}")
+    print(f"  Max Reward: {aggregated_results['reward_max']:.2f}")
+    
+    return aggregated_results
+
+def create_summary_plots(results, save_dir):
+    """Create summary plots from aggregated test results"""
+    
+    # Plot 1: Mean ± SEM trajectories for infections, new_infections, and removed_people
+    plt.figure(figsize=(12, 7))
+    
+    # Prepare data for each metric
+    metrics = {
+        'Total Infections': results['infections'],
+        'New Infections': results['new_infections'],
+        'Removed People': results['removed_people']
+    }
+    
+    colors = {'Total Infections': 'blue', 'New Infections': 'orange', 'Removed People': 'green'}
+    
+    for metric_name, metric_data in metrics.items():
+        # Find max length and pad arrays
+        max_len = max(len(run) for run in metric_data)
+        padded_data = np.array([run + [np.nan] * (max_len - len(run)) for run in metric_data])
+        
+        # Calculate mean and SEM
+        mean_values = np.nanmean(padded_data, axis=0)
+        sem_values = np.nanstd(padded_data, axis=0) / np.sqrt(np.sum(~np.isnan(padded_data), axis=0))
+        
+        days = np.arange(len(mean_values))
+        
+        # Plot mean line
+        plt.plot(days, mean_values, label=metric_name, color=colors[metric_name], linewidth=2)
+        
+        # Plot shaded SEM region
+        plt.fill_between(days, 
+                         mean_values - sem_values, 
+                         mean_values + sem_values, 
+                         alpha=0.3, 
+                         color=colors[metric_name])
+    
+    plt.xlabel('Days', fontsize=12)
+    plt.ylabel('Count', fontsize=12)
+    plt.title('Mean ± SEM Across Runs', fontsize=14)
+    plt.legend(loc='best', fontsize=10)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'metrics_mean_sem.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Plot 2: Action heatmap showing action types over games
+    # Parse action names to extract action types
+    all_action_sequences = results['named_actions']
+    
+    # Extract action types (first element of tuple)
+    action_types_per_run = []
+    for run_actions in all_action_sequences:
+        action_types = []
+        for action_str in run_actions:
+            try:
+                # Parse the string representation of the tuple
+                # Extract the action type (first element before comma)
+                action_type = action_str.split("'")[1] if "'" in action_str else 'unknown'
+                action_types.append(action_type)
+            except:
+                action_types.append('unknown')
+        action_types_per_run.append(action_types)
+    
+    # Get unique action types and assign colors
+    all_action_types = set()
+    for run in action_types_per_run:
+        all_action_types.update(run)
+    
+    unique_actions = sorted(list(all_action_types))
+    action_to_idx = {action: idx for idx, action in enumerate(unique_actions)}
+    
+    # Create color map
+    n_actions = len(unique_actions)
+    cmap = plt.cm.get_cmap('tab10' if n_actions <= 10 else 'tab20')
+    action_colors = {action: cmap(i / n_actions) for i, action in enumerate(unique_actions)}
+    
+    # Create the heatmap data
+    max_days = max(len(run) for run in action_types_per_run)
+    n_runs = len(action_types_per_run)
+    
+    # Create matrix for heatmap
+    action_matrix = np.full((max_days, n_runs), np.nan)
+    
+    for run_idx, action_sequence in enumerate(action_types_per_run):
+        for day_idx, action_type in enumerate(action_sequence):
+            action_matrix[day_idx, run_idx] = action_to_idx[action_type]
+    
+    # Create the plot
+    fig, ax = plt.subplots(figsize=(14, 8))
+    
+    # Create custom colormap
+    from matplotlib.colors import ListedColormap
+    colors_list = [action_colors[action] for action in unique_actions]
+    custom_cmap = ListedColormap(colors_list)
+    
+    # Plot heatmap
+    im = ax.imshow(action_matrix.T, aspect='auto', cmap=custom_cmap, 
+                   interpolation='nearest', vmin=0, vmax=n_actions-1)
+    
+    ax.set_xlabel('Day', fontsize=12)
+    ax.set_ylabel('Game / Epic', fontsize=12)
+    ax.set_title('Testing Gameplay - Action Types', fontsize=14, fontweight='bold')
+    
+    # Create legend
+    from matplotlib.patches import Patch
+    legend_elements = [Patch(facecolor=action_colors[action], label=action) 
+                      for action in unique_actions]
+    ax.legend(handles=legend_elements, bbox_to_anchor=(1.05, 1), 
+             loc='upper left', fontsize=8, ncol=1)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'action_heatmap.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    # Also create a simpler action distribution plot
+    plt.figure(figsize=(12, 6))
+    action_counts = Counter()
+    for run in action_types_per_run:
+        action_counts.update(run)
+    
+    actions_sorted = sorted(action_counts.items(), key=lambda x: x[1], reverse=True)
+    action_names = [a[0] for a in actions_sorted]
+    counts = [a[1] for a in actions_sorted]
+    
+    bars = plt.bar(range(len(action_names)), counts, 
+                   color=[action_colors[a] for a in action_names],
+                   edgecolor='black', alpha=0.7)
+    
+    plt.xlabel('Action Type', fontsize=12, fontweight='bold')
+    plt.ylabel('Total Count Across All Runs', fontsize=12, fontweight='bold')
+    plt.title('Action Type Distribution', fontsize=14, fontweight='bold')
+    plt.xticks(range(len(action_names)), action_names, rotation=45, ha='right')
+    plt.grid(True, alpha=0.3, axis='y')
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'action_distribution.png'), dpi=300, bbox_inches='tight')
+    plt.close()
+ 
 if __name__ == "__main__":
-    train(device=torch.device('cpu'),temperature=5,  epochs=5000)
-    test('models/final_model.pt', device=torch.device('cpu'))
+    #train(device=torch.device('cpu'),temperature=1.5,  epochs=3000)
+    #test('models/final_model.pt', device=torch.device('cpu'))
+    n =200
+    model_path = 'best_dec8/final_model.pt'
+    tests_folder = 'tests_dec8'
+
+    n_tests(n, model_path, tests_folder, device=torch.device('cpu'))
     
     

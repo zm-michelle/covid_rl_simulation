@@ -1240,9 +1240,7 @@ class gameEnvironment:
     def step(self, action_idx):
 
         action_name, params = self.flat_actions[action_idx]
-        if action_name == 'vaccinate_person':
-            print(f"DEBUG step(): About to vaccinate, doses available: {self.vaccine.availableDoses}")
-    
+        
         result = self.take_action(action_name, params)
         if result is None or result['success'] == False:
             # If it is with agent I think raising an error is appropiate
